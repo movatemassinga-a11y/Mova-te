@@ -1,0 +1,16 @@
+{
+  "name": "Mova-te Massinga",
+  "short_name": "Mova-te",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0047AB",
+  "theme_color": "#0047AB",
+  "icons": [
+    {
+      "src": "https://img.icons8.com/fluency/512/taxi.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

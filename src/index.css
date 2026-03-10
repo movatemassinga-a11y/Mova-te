@@ -4,6 +4,11 @@
   --color-primary: #0047AB; /* Blue */
   --color-secondary: #FF8C00; /* Orange */
   --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  
+  @keyframes shimmer {
+    0% { background-position: -200% 0; }
+    100% { background-position: 200% 0; }
+  }
 }
 
 @layer base {

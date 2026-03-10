@@ -17,7 +17,11 @@ import {
   MapPin,
   DollarSign,
   ArrowLeft,
-  X
+  Star,
+  X,
+  Camera,
+  Upload,
+  Trash2
 } from 'lucide-react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -59,10 +63,25 @@ const playNotificationSound = (type: 'new' | 'info' = 'info') => {
 };
 
 export default function App() {
-  const [role, setRole] = useState<'client' | 'driver' | 'admin' | null>(null);
-  const [user, setUser] = useState<any>(null);
-  const [view, setView] = useState<'login' | 'dashboard' | 'ride'>('login');
-  const [showWelcome, setShowWelcome] = useState(true);
+  const [role, setRole] = useState<'client' | 'driver' | 'admin' | null>(() => localStorage.getItem('movate_role') as any);
+  const [user, setUser] = useState<any>(() => {
+    const saved = localStorage.getItem('movate_user');
+    return saved ? JSON.parse(saved) : null;
+  });
+  const [view, setView] = useState<'login' | 'dashboard' | 'ride'>(() => {
+    return localStorage.getItem('movate_role') ? 'dashboard' : 'login';
+  });
+  const [showWelcome, setShowWelcome] = useState(() => !localStorage.getItem('movate_role'));
+  const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
+
+  useEffect(() => {
+    const handleBeforeInstallPrompt = (e: any) => {
+      e.preventDefault();
+      setDeferredPrompt(e);
+    };
+    window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+    return () => window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+  }, []);
   const [rides, setRides] = useState<Ride[]>([]);
   const [currentRide, setCurrentRide] = useState<Ride | null>(null);
   const [offers, setOffers] = useState<Offer[]>([]);
@@ -72,6 +91,51 @@ export default function App() {
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' | 'danger' } | null>(null);
   const [confirmModal, setConfirmModal] = useState<{ title: string; message: string; onConfirm: () => void } | null>(null);
 
+  const VAPID_PUBLIC_KEY = 'BJOzr0pI9wfDB1qAGofmejVn3uZJerEOKlpvy096xPIToYa1PupbfUorgX7d6oARc_exoO7xnHECcrMop87oHj4';
+
+  const urlBase64ToUint8Array = (base64String: string) => {
+    const padding = '='.repeat((4 - base64String.length % 4) % 4);
+    const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+    const rawData = window.atob(base64);
+    const outputArray = new Uint8Array(rawData.length);
+    for (let i = 0; i < rawData.length; ++i) {
+      outputArray[i] = rawData.charCodeAt(i);
+    }
+    return outputArray;
+  };
+
+  const subscribeToPush = async (driverId: number) => {
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
+
+    try {
+      const registration = await navigator.serviceWorker.register('/sw.js');
+      console.log('Service Worker registered');
+
+      const permission = await Notification.requestPermission();
+      if (permission !== 'granted') return;
+
+      const subscription = await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY)
+      });
+
+      await fetch('/api/push/subscribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ driver_id: driverId, subscription })
+      });
+      console.log('Push subscription successful');
+    } catch (err) {
+      console.error('Push subscription failed:', err);
+    }
+  };
+
+  useEffect(() => {
+    if (role === 'driver' && user?.id) {
+      subscribeToPush(user.id);
+    }
+  }, [role, user]);
+
   const showToast = (message: string, type: 'success' | 'error' | 'info' | 'danger' = 'info') => {
     setToast({ message, type });
     setTimeout(() => setToast(null), 4000);
@@ -79,26 +143,15 @@ export default function App() {
 
   // Persistence
   useEffect(() => {
-    const savedRole = localStorage.getItem('movate_role');
-    const savedUser = localStorage.getItem('movate_user');
     const savedRide = localStorage.getItem('movate_current_ride');
-    
-    if (savedRole && savedUser) {
-      setRole(savedRole as any);
-      const parsedUser = JSON.parse(savedUser);
-      setUser(parsedUser);
-      setView('dashboard');
-      setShowWelcome(false);
-
-      if (savedRide) {
-        const parsedRide = JSON.parse(savedRide);
-        setCurrentRide(parsedRide);
-        setView('ride');
-        // Fetch messages for current ride
-        fetch(`/api/admin/messages/${parsedRide.id}`)
-          .then(res => res.json())
-          .then(data => setMessages(data));
-      }
+    if (savedRide) {
+      const parsedRide = JSON.parse(savedRide);
+      setCurrentRide(parsedRide);
+      setView('ride');
+      // Fetch messages for current ride
+      fetch(`/api/admin/messages/${parsedRide.id}`)
+        .then(res => res.json())
+        .then(data => setMessages(data));
     }
   }, []);
 
@@ -135,6 +188,9 @@ export default function App() {
   // Socket Listeners
   useEffect(() => {
     socket.on('new_ride_request', (ride: Ride) => {
+      // If driver, only add if it's their category
+      if (role === 'driver' && ride.category !== user?.category) return;
+      
       setRides(prev => {
         if (prev.some(r => r.id === ride.id)) return prev;
         return [ride, ...prev];
@@ -149,15 +205,24 @@ export default function App() {
     });
 
     socket.on('new_offer', (offer: Offer) => {
-      if (currentRide?.id === offer.ride_id || (role === 'client' && view === 'waiting')) {
+      if (currentRide?.id === offer.ride_id || (role === 'client' && view === 'waiting') || role === 'driver') {
         setOffers(prev => {
-          if (prev.some(o => o.id === offer.id)) return prev;
+          const index = prev.findIndex(o => o.id === offer.id);
+          if (index !== -1) {
+            const newOffers = [...prev];
+            newOffers[index] = offer;
+            return newOffers;
+          }
           return [...prev, offer];
         });
         if (role === 'client') {
           playNotificationSound('new');
         }
       }
+    });
+
+    socket.on('offer_updated', (offer: Offer) => {
+      setOffers(prev => prev.map(o => o.id === offer.id ? offer : o));
     });
 
     socket.on('ride_accepted', (ride: Ride) => {
@@ -173,10 +238,6 @@ export default function App() {
       setRides(prev => prev.map(r => r.id === ride_id ? { ...r, status: 'finished' } : r));
       if (currentRide?.id === ride_id) {
         setCurrentRide(prev => prev ? { ...prev, status: 'finished' } : null);
-        setTimeout(() => {
-          setCurrentRide(null);
-          setView('dashboard');
-        }, 2000);
       }
     });
 
@@ -209,6 +270,7 @@ export default function App() {
       socket.off('new_ride_request');
       socket.off('ride_created');
       socket.off('new_offer');
+      socket.off('offer_updated');
       socket.off('ride_accepted');
       socket.off('ride_finished');
       socket.off('new_message');
@@ -229,7 +291,7 @@ export default function App() {
   };
 
   if (showWelcome && !role) {
-    return <WelcomeScreen onFinish={() => setShowWelcome(false)} />;
+    return <WelcomeScreen onFinish={() => setShowWelcome(false)} deferredPrompt={deferredPrompt} />;
   }
 
   if (view === 'login' && !role) {
@@ -273,10 +335,14 @@ export default function App() {
         {role === 'driver' && (
           <DriverDashboard 
             driver={user} 
+            setUser={setUser}
+            setView={setView}
             rides={rides} 
             setRides={setRides}
             currentRide={currentRide}
             setCurrentRide={setCurrentRide}
+            offers={offers}
+            setOffers={setOffers}
             messages={messages}
             setMessages={setMessages}
             showToast={showToast}
@@ -334,7 +400,17 @@ export default function App() {
   );
 }
 
-function WelcomeScreen({ onFinish }: { onFinish: () => void }) {
+function WelcomeScreen({ onFinish, deferredPrompt }: { onFinish: () => void, deferredPrompt: any }) {
+  const handleInstall = async () => {
+    if (deferredPrompt) {
+      deferredPrompt.prompt();
+      const { outcome } = await deferredPrompt.userChoice;
+      console.log(`User response to the install prompt: ${outcome}`);
+    } else {
+      alert('Para adicionar à tela inicial:\n\nNo iPhone: Toque no ícone de compartilhar e selecione "Adicionar à Tela de Início".\n\nNo Android: Toque nos três pontos do menu e selecione "Instalar aplicativo".');
+    }
+  };
+
   return (
     <div className="min-h-screen max-w-md mx-auto bg-primary flex flex-col items-center justify-between p-8 text-white relative overflow-hidden">
       {/* Background Decorative Circles */}
@@ -347,16 +423,20 @@ function WelcomeScreen({ onFinish }: { onFinish: () => void }) {
         </div>
         
         <div className="space-y-2">
-          <h1 className="text-5xl font-black tracking-tighter">Mova-te</h1>
-          <p className="text-white/60 font-medium text-lg">Massinga na palma da mão</p>
+          <h1 className="text-5xl font-black tracking-tighter">Mova-te Massinga</h1>
+          <p className="text-white/60 font-medium text-lg">Segurança, Conforto e Rapidez</p>
+          <p className="text-white/40 text-sm italic">Sua viagem na palma da mão</p>
         </div>
 
-        <div className="bg-white/10 backdrop-blur-md border border-white/10 rounded-3xl p-6 w-full max-w-xs space-y-4">
+        <button 
+          onClick={handleInstall}
+          className="bg-white/10 backdrop-blur-md border border-white/10 rounded-3xl p-6 w-full max-w-xs space-y-4 hover:bg-white/20 transition-all active:scale-95 text-left"
+        >
           <div className="flex items-center gap-3">
             <div className="bg-secondary p-2 rounded-xl">
               <Plus className="text-white" size={20} />
             </div>
-            <p className="text-left text-xs font-bold leading-tight">
+            <p className="text-xs font-bold leading-tight">
               Dica: Salve o app na sua tela inicial para acesso rápido!
             </p>
           </div>
@@ -365,7 +445,7 @@ function WelcomeScreen({ onFinish }: { onFinish: () => void }) {
             <span>•</span>
             <span>Adicionar à tela inicial</span>
           </div>
-        </div>
+        </button>
       </div>
 
       <div className="w-full space-y-4 animate-in slide-in-from-bottom-10 duration-700 delay-300 fill-mode-both">
@@ -376,7 +456,7 @@ function WelcomeScreen({ onFinish }: { onFinish: () => void }) {
           Começar Agora
         </button>
         <p className="text-center text-[10px] text-white/40 font-bold uppercase tracking-widest">
-          © 2024 Mova-te Massinga
+          © 2026 Mova-te Massinga
         </p>
       </div>
     </div>
@@ -393,14 +473,20 @@ function LoginScreen({ setRole, setUser, setView, onBack }: any) {
     setError('');
     
     if (loginType === 'client') {
+      if (!formData.username || !formData.phone) {
+        setError('Nome e telefone são obrigatórios');
+        return;
+      }
       setRole('client');
-      setUser({ name: formData.username || 'Cliente' });
+      setUser({ name: formData.username.trim(), phone: formData.phone.trim() });
+      localStorage.setItem('movate_role', 'client');
+      localStorage.setItem('movate_user', JSON.stringify({ name: formData.username.trim(), phone: formData.phone.trim() }));
       setView('dashboard');
     } else if (loginType === 'admin') {
       const res = await fetch('/api/admin/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: formData.username, password: formData.password })
+        body: JSON.stringify({ username: formData.username.trim(), password: formData.password.trim() })
       });
       const data = await res.json();
       if (data.success) {
@@ -414,7 +500,7 @@ function LoginScreen({ setRole, setUser, setView, onBack }: any) {
       const res = await fetch('/api/driver/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ phone: formData.phone, access_key: formData.key })
+        body: JSON.stringify({ phone: formData.phone.trim(), access_key: formData.key.trim() })
       });
       const data = await res.json();
       if (data.success) {
@@ -462,20 +548,36 @@ function LoginScreen({ setRole, setUser, setView, onBack }: any) {
 
         <form onSubmit={handleLogin} className="space-y-4">
           {loginType === 'client' && (
-            <div className="space-y-1">
-              <label className="text-xs font-semibold text-slate-500 uppercase ml-1">Seu Nome</label>
-              <div className="relative">
-                <Users className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
-                <input
-                  type="text"
-                  placeholder="Ex: João Silva"
-                  className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all"
-                  value={formData.username}
-                  onChange={e => setFormData({ ...formData, username: e.target.value })}
-                  required
-                />
+            <>
+              <div className="space-y-1">
+                <label className="text-xs font-semibold text-slate-500 uppercase ml-1">Seu Nome</label>
+                <div className="relative">
+                  <Users className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
+                  <input
+                    type="text"
+                    placeholder="Ex: João Silva"
+                    className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all"
+                    value={formData.username}
+                    onChange={e => setFormData({ ...formData, username: e.target.value })}
+                    required
+                  />
+                </div>
               </div>
-            </div>
+              <div className="space-y-1">
+                <label className="text-xs font-semibold text-slate-500 uppercase ml-1">Seu Telefone</label>
+                <div className="relative">
+                  <Phone className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
+                  <input
+                    type="tel"
+                    placeholder="84xxxxxxx"
+                    className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all"
+                    value={formData.phone}
+                    onChange={e => setFormData({ ...formData, phone: e.target.value })}
+                    required
+                  />
+                </div>
+              </div>
+            </>
           )}
 
           {loginType === 'driver' && (
@@ -558,6 +660,196 @@ function LoginScreen({ setRole, setUser, setView, onBack }: any) {
   );
 }
 
+function PhotoUpload({ onPhotoCaptured, currentPhoto }: { onPhotoCaptured: (base64: string) => void, currentPhoto?: string }) {
+  const [isCapturing, setIsCapturing] = useState(false);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  const startCamera = async () => {
+    setIsCapturing(true);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } });
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+      }
+    } catch (err) {
+      console.error("Error accessing camera:", err);
+      setIsCapturing(false);
+    }
+  };
+
+  const capturePhoto = () => {
+    if (videoRef.current && canvasRef.current) {
+      const context = canvasRef.current.getContext('2d');
+      if (context) {
+        canvasRef.current.width = videoRef.current.videoWidth;
+        canvasRef.current.height = videoRef.current.videoHeight;
+        context.drawImage(videoRef.current, 0, 0);
+        const base64 = canvasRef.current.toDataURL('image/jpeg', 0.7);
+        onPhotoCaptured(base64);
+        stopCamera();
+      }
+    }
+  };
+
+  const stopCamera = () => {
+    if (videoRef.current && videoRef.current.srcObject) {
+      const stream = videoRef.current.srcObject as MediaStream;
+      stream.getTracks().forEach(track => track.stop());
+      videoRef.current.srcObject = null;
+    }
+    setIsCapturing(false);
+  };
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        onPhotoCaptured(reader.result as string);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-center">
+        {currentPhoto && !isCapturing ? (
+          <div className="relative">
+            <img src={currentPhoto} alt="Driver" className="w-24 h-24 rounded-full object-cover border-4 border-white shadow-lg" />
+            <button 
+              onClick={() => onPhotoCaptured('')}
+              className="absolute -top-1 -right-1 bg-red-500 text-white p-1 rounded-full shadow-md"
+            >
+              <X size={12} />
+            </button>
+          </div>
+        ) : (
+          <div className="w-24 h-24 rounded-full bg-slate-100 border-2 border-dashed border-slate-300 flex items-center justify-center text-slate-400 overflow-hidden relative">
+            {isCapturing ? (
+              <video ref={videoRef} autoPlay playsInline className="w-full h-full object-cover" />
+            ) : (
+              <Users size={32} />
+            )}
+          </div>
+        )}
+      </div>
+
+      <div className="flex gap-2 justify-center">
+        {!isCapturing ? (
+          <>
+            <button 
+              type="button"
+              onClick={startCamera}
+              className="flex items-center gap-1 bg-primary/10 text-primary px-3 py-1.5 rounded-lg text-[10px] font-bold"
+            >
+              <Camera size={12} /> Foto
+            </button>
+            <label className="flex items-center gap-1 bg-secondary/10 text-secondary px-3 py-1.5 rounded-lg text-[10px] font-bold cursor-pointer">
+              <Upload size={12} /> Upload
+              <input type="file" accept="image/*" className="hidden" onChange={handleFileUpload} />
+            </label>
+          </>
+        ) : (
+          <>
+            <button 
+              type="button"
+              onClick={capturePhoto}
+              className="bg-green-500 text-white px-4 py-1.5 rounded-lg text-[10px] font-bold"
+            >
+              Tirar Foto
+            </button>
+            <button 
+              type="button"
+              onClick={stopCamera}
+              className="bg-slate-500 text-white px-4 py-1.5 rounded-lg text-[10px] font-bold"
+            >
+              Cancelar
+            </button>
+          </>
+        )}
+      </div>
+      <canvas ref={canvasRef} className="hidden" />
+    </div>
+  );
+}
+
+function OfferCard({ offer, onAccept, onCounter }: { offer: Offer, onAccept: (id: number) => void, onCounter: (id: number, price: number) => void, key?: any }) {
+  const [counterPrice, setCounterPrice] = useState('');
+
+  return (
+    <div className="w-full bg-white border-2 border-secondary/20 rounded-3xl p-5 shadow-xl hover:border-secondary transition-all group animate-in zoom-in-95 duration-300">
+      <div className="flex justify-between items-start mb-4">
+        <div className="flex items-center gap-3">
+          <div className="bg-slate-100 p-0.5 rounded-2xl group-hover:bg-secondary/10 transition-colors relative overflow-hidden w-14 h-14 flex items-center justify-center">
+            {offer.driver_photo ? (
+              <img src={offer.driver_photo} alt={offer.driver_name} className="w-full h-full object-cover rounded-2xl" />
+            ) : (
+              offer.driver_category === 'Moto' ? <Bike size={24} className="text-slate-600 group-hover:text-secondary" /> : 
+              offer.driver_category === 'Txopela' ? <Navigation size={24} className="text-slate-600 group-hover:text-secondary" /> : 
+              <Car size={24} className="text-slate-600 group-hover:text-secondary" />
+            )}
+            <div className="absolute -bottom-1 -right-1 bg-white rounded-full p-0.5 shadow-sm border border-slate-100">
+              <div className="bg-green-500 w-2 h-2 rounded-full" />
+            </div>
+          </div>
+          <div>
+            <span className="text-xs font-black text-primary uppercase tracking-tight block">{offer.driver_name}</span>
+            <div className="flex items-center gap-1 mt-0.5">
+              <Star size={10} className="text-yellow-400 fill-yellow-400" />
+              <span className="text-[10px] font-bold text-slate-600">
+                {offer.avg_rating ? offer.avg_rating.toFixed(1) : 'Novo'}
+              </span>
+            </div>
+          </div>
+        </div>
+        <div className="text-right">
+          <p className="text-[10px] font-bold text-slate-400 uppercase">Preço</p>
+          <span className="text-xl font-black text-secondary">MT {offer.price}</span>
+        </div>
+      </div>
+
+      {offer.counter_price ? (
+        <div className="mb-4 p-3 bg-secondary/5 rounded-2xl border border-secondary/10 text-center">
+          <p className="text-[10px] font-bold text-secondary uppercase mb-1">Aguardando Resposta da sua Contraproposta</p>
+          <span className="text-sm font-black text-secondary">MT {offer.counter_price}</span>
+        </div>
+      ) : (
+        <div className="mb-4 flex gap-2">
+          <div className="relative flex-1">
+            <DollarSign className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
+            <input 
+              type="number" 
+              placeholder="Contraproposta"
+              className="w-full pl-8 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-secondary/20"
+              value={counterPrice}
+              onChange={e => setCounterPrice(e.target.value)}
+            />
+          </div>
+          <button 
+            disabled={!counterPrice}
+            onClick={() => {
+              onCounter(offer.id, Number(counterPrice));
+              setCounterPrice('');
+            }}
+            className="px-4 py-2 bg-secondary/10 text-secondary text-[10px] font-black uppercase rounded-xl hover:bg-secondary/20 disabled:opacity-50 transition-all"
+          >
+            Negociar
+          </button>
+        </div>
+      )}
+
+      <button 
+        onClick={() => onAccept(offer.id)}
+        className="w-full bg-primary text-white font-bold py-4 rounded-2xl shadow-lg shadow-primary/20 hover:bg-primary/90 active:scale-[0.98] transition-all"
+      >
+        Aceitar Esta Oferta
+      </button>
+    </div>
+  );
+}
+
 function ClientDashboard({ view, setView, currentRide, setCurrentRide, offers, setOffers, messages, setMessages, showToast, setConfirmModal }: any) {
   const [pickup, setPickup] = useState('');
   const [destination, setDestination] = useState('');
@@ -624,36 +916,61 @@ function ClientDashboard({ view, setView, currentRide, setCurrentRide, offers, s
   };
 
   if (currentRide && (currentRide.status === 'accepted' || currentRide.status === 'finished')) {
-    return <RideScreen ride={currentRide} role="client" messages={messages} showToast={showToast} setConfirmModal={setConfirmModal} />;
+    return (
+      <RideScreen 
+        ride={currentRide} 
+        role="client" 
+        messages={messages} 
+        showToast={showToast} 
+        setConfirmModal={setConfirmModal} 
+        onRideFinished={() => {
+          setCurrentRide(null);
+          setView('dashboard');
+          setOffers([]);
+        }}
+      />
+    );
   }
 
   if (view === 'waiting') {
     return (
-      <div className="flex flex-col items-center justify-center min-h-[400px] space-y-8 py-8">
+      <div className="flex flex-col items-center justify-center min-h-[450px] space-y-10 py-8 px-4">
         <div className="relative flex items-center justify-center">
-          {/* Radar Circles */}
-          <div className="absolute w-64 h-64 bg-secondary/5 rounded-full animate-[ping_3s_linear_infinite]" />
-          <div className="absolute w-48 h-48 bg-secondary/10 rounded-full animate-[ping_2s_linear_infinite]" />
-          <div className="absolute w-32 h-32 bg-secondary/20 rounded-full animate-[ping_1.5s_linear_infinite]" />
+          {/* Animated Outer Rings */}
+          <div className="absolute w-72 h-72 border border-primary/10 rounded-full animate-[pulse_4s_ease-in-out_infinite]" />
+          <div className="absolute w-56 h-56 border border-secondary/20 rounded-full animate-[pulse_3s_ease-in-out_infinite]" />
           
-          <div className="relative bg-secondary p-8 rounded-full text-white shadow-2xl z-10 transform transition-transform hover:scale-110">
-            {category === 'Moto' ? <Bike size={56} className="animate-bounce" /> : 
-             category === 'Txopela' ? <Navigation size={56} className="animate-pulse" /> : 
-             <Car size={56} className="animate-bounce" />}
+          {/* Spinning Progress Ring */}
+          <div className="absolute w-48 h-48 rounded-full border-4 border-slate-100" />
+          <div className="absolute w-48 h-48 rounded-full border-4 border-t-secondary border-r-transparent border-b-primary border-l-transparent animate-spin" />
+          
+          {/* Radar Pings */}
+          <div className="absolute w-64 h-64 bg-secondary/5 rounded-full animate-[ping_3s_linear_infinite]" />
+          <div className="absolute w-40 h-40 bg-primary/5 rounded-full animate-[ping_2s_linear_infinite]" />
+          
+          <div className="relative bg-secondary p-10 rounded-full text-white shadow-2xl z-10 transform transition-transform hover:scale-105">
+            {category === 'Moto' ? <Bike size={64} className="animate-bounce" /> : 
+             category === 'Txopela' ? <Navigation size={64} className="animate-pulse" /> : 
+             <Car size={64} className="animate-bounce" />}
           </div>
         </div>
 
-        <div className="text-center space-y-2 px-4">
-          <h2 className="text-2xl font-black text-primary tracking-tight">Buscando {category}</h2>
-          <div className="h-6 flex items-center justify-center">
+        <div className="text-center space-y-4 w-full max-w-xs">
+          <div className="space-y-1">
+            <h2 className="text-3xl font-black text-primary tracking-tight">Buscando {category}</h2>
+            <p className="text-secondary font-bold text-xs uppercase tracking-widest">Aguardando ofertas...</p>
+          </div>
+          
+          {/* Progress Bar */}
+          <div className="w-full h-1.5 bg-slate-100 rounded-full overflow-hidden">
+            <div className="h-full bg-gradient-to-r from-primary via-secondary to-primary w-full rounded-full animate-[shimmer_2s_infinite_linear]" 
+                 style={{ backgroundSize: '200% 100%' }} />
+          </div>
+
+          <div className="h-8 flex items-center justify-center">
             <p className="text-slate-500 text-sm font-medium animate-in fade-in slide-in-from-bottom-2 duration-500" key={searchMessageIndex}>
               {searchingMessages[searchMessageIndex]}
             </p>
-          </div>
-          <div className="flex justify-center gap-1 mt-4">
-            <div className="w-1.5 h-1.5 bg-secondary rounded-full animate-bounce [animation-delay:-0.3s]" />
-            <div className="w-1.5 h-1.5 bg-secondary rounded-full animate-bounce [animation-delay:-0.15s]" />
-            <div className="w-1.5 h-1.5 bg-secondary rounded-full animate-bounce" />
           </div>
         </div>
 
@@ -666,31 +983,12 @@ function ClientDashboard({ view, setView, currentRide, setCurrentRide, offers, s
             </div>
           )}
           {offers.map((offer: Offer) => (
-            <div key={offer.id} className="w-full bg-white border-2 border-secondary/20 rounded-3xl p-5 shadow-xl hover:border-secondary transition-all group animate-in zoom-in-95 duration-300">
-              <div className="flex justify-between items-center mb-4">
-                <div className="flex items-center gap-3">
-                  <div className="bg-slate-100 p-3 rounded-2xl group-hover:bg-secondary/10 transition-colors">
-                    {offer.driver_category === 'Moto' ? <Bike size={24} className="text-slate-600 group-hover:text-secondary" /> : 
-                     offer.driver_category === 'Txopela' ? <Navigation size={24} className="text-slate-600 group-hover:text-secondary" /> : 
-                     <Car size={24} className="text-slate-600 group-hover:text-secondary" />}
-                  </div>
-                  <div>
-                    <span className="text-xs font-black text-primary uppercase tracking-tight">{offer.driver_name}</span>
-                    <p className="text-[10px] text-slate-400 font-medium">Motorista Verificado</p>
-                  </div>
-                </div>
-                <div className="text-right">
-                  <p className="text-[10px] font-bold text-slate-400 uppercase">Preço</p>
-                  <span className="text-xl font-black text-secondary">MT {offer.price}</span>
-                </div>
-              </div>
-              <button 
-                onClick={() => acceptOffer(offer.id)}
-                className="w-full bg-primary text-white font-bold py-4 rounded-2xl shadow-lg shadow-primary/20 hover:bg-primary/90 active:scale-[0.98] transition-all"
-              >
-                Aceitar Esta Oferta
-              </button>
-            </div>
+            <OfferCard 
+              key={offer.id} 
+              offer={offer} 
+              onAccept={acceptOffer} 
+              onCounter={(id, price) => { socket.emit('client_counter', { offer_id: id, counter_price: price }); }}
+            />
           ))}
         </div>
 
@@ -714,7 +1012,7 @@ function ClientDashboard({ view, setView, currentRide, setCurrentRide, offers, s
             </button>
           )}
           <h2 className="text-xl font-bold text-primary">
-            {showHistory ? 'Meu Histórico' : 'Para onde vamos?'}
+            {showHistory ? 'Meu Histórico' : `Bem-vindo, ${clientName}! Para onde vamos?`}
           </h2>
         </div>
         {!showHistory && (
@@ -820,20 +1118,41 @@ function ClientDashboard({ view, setView, currentRide, setCurrentRide, offers, s
   );
 }
 
-function DriverDashboard({ driver, rides, setRides, currentRide, setCurrentRide, messages, setMessages, showToast, setConfirmModal }: any) {
+function DriverDashboard({ driver, setUser, setView, rides, setRides, currentRide, setCurrentRide, offers, setOffers, messages, setMessages, showToast, setConfirmModal }: any) {
   const [offerPrice, setOfferPrice] = useState('');
   const [selectedRide, setSelectedRide] = useState<Ride | null>(null);
   const [history, setHistory] = useState<Ride[]>([]);
   const [showHistory, setShowHistory] = useState(false);
   const [dismissedRideIds, setDismissedRideIds] = useState<number[]>([]);
+  const [showPhotoEditor, setShowPhotoEditor] = useState(false);
+
+  const updatePhoto = async (base64: string) => {
+    const res = await fetch('/api/driver/photo', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ driver_id: driver.id, photo: base64 })
+    });
+    if (res.ok) {
+      const updatedUser = { ...driver, photo: base64 };
+      setUser(updatedUser);
+      localStorage.setItem('movate_user', JSON.stringify(updatedUser));
+      showToast('Foto atualizada com sucesso!', 'success');
+      setShowPhotoEditor(false);
+    }
+  };
 
   useEffect(() => {
     if (showHistory) {
       fetch(`/api/driver/rides/${driver.id}`)
         .then(res => res.json())
         .then(data => setHistory(data));
+    } else {
+      // Fetch current offers for the driver
+      fetch(`/api/driver/offers/${driver.id}`)
+        .then(res => res.json())
+        .then(data => setOffers(data));
     }
-  }, [showHistory, driver.id]);
+  }, [showHistory, driver.id, setOffers]);
 
   const filteredRides = rides.filter(r => 
     r.category === driver.category && 
@@ -853,7 +1172,19 @@ function DriverDashboard({ driver, rides, setRides, currentRide, setCurrentRide,
   };
 
   if (currentRide && (currentRide.status === 'accepted' || currentRide.status === 'finished')) {
-    return <RideScreen ride={currentRide} role="driver" messages={messages} showToast={showToast} setConfirmModal={setConfirmModal} />;
+    return (
+      <RideScreen 
+        ride={currentRide} 
+        role="driver" 
+        messages={messages} 
+        showToast={showToast} 
+        setConfirmModal={setConfirmModal} 
+        onRideFinished={() => {
+          setCurrentRide(null);
+          setView('dashboard');
+        }}
+      />
+    );
   }
 
   return (
@@ -866,19 +1197,46 @@ function DriverDashboard({ driver, rides, setRides, currentRide, setCurrentRide,
                 <ArrowLeft size={16} />
               </button>
             )}
+            <button 
+              onClick={() => setShowPhotoEditor(!showPhotoEditor)}
+              className="relative group"
+            >
+              {driver.photo ? (
+                <img src={driver.photo} alt={driver.name} className="w-14 h-14 rounded-2xl object-cover border-2 border-white/20" />
+              ) : (
+                <div className="w-14 h-14 rounded-2xl bg-white/10 flex items-center justify-center border-2 border-white/20">
+                  <Users size={24} />
+                </div>
+              )}
+              <div className="absolute inset-0 bg-black/40 rounded-2xl opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity">
+                <Camera size={16} className="text-white" />
+              </div>
+            </button>
             <div>
               <p className="text-white/60 text-xs font-bold uppercase tracking-wider">Bem-vindo,</p>
               <h2 className="text-2xl font-bold">{driver.name}</h2>
             </div>
           </div>
-          <div className="bg-white/10 p-2 rounded-xl">
+          <div className="bg-white/10 p-2 rounded-xl flex flex-col items-center gap-1">
             {driver.category === 'Moto' ? <Bike size={24} /> : driver.category === 'Txopela' ? <Navigation size={24} /> : <Car size={24} />}
+            <span className="text-[8px] font-black uppercase">{driver.category}</span>
           </div>
         </div>
+
+        {showPhotoEditor && (
+          <div className="mt-6 p-4 bg-white/10 rounded-2xl border border-white/10 animate-in slide-in-from-top-4">
+            <p className="text-[10px] font-bold uppercase mb-3 text-center">Atualizar Minha Foto</p>
+            <PhotoUpload 
+              onPhotoCaptured={updatePhoto} 
+              currentPhoto={driver.photo} 
+            />
+          </div>
+        )}
+
         <div className="mt-4 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <div className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
-            <span className="text-xs font-medium text-white/80">Online • {driver.category}</span>
+            <span className="text-[10px] font-bold uppercase tracking-widest text-white/60">Motorista Online</span>
           </div>
           {!showHistory && (
             <button 
@@ -937,7 +1295,12 @@ function DriverDashboard({ driver, rides, setRides, currentRide, setCurrentRide,
                       </div>
                       <div>
                         <p className="font-bold text-primary">{ride.client_name}</p>
-                        <p className="text-[10px] text-slate-400">Solicitado agora</p>
+                        <div className="flex items-center gap-1">
+                          <Star size={10} className="text-yellow-400 fill-yellow-400" />
+                          <span className="text-[10px] font-bold text-slate-400">
+                            {ride.client_avg_rating ? ride.client_avg_rating.toFixed(1) : 'Novo Cliente'}
+                          </span>
+                        </div>
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
@@ -989,12 +1352,50 @@ function DriverDashboard({ driver, rides, setRides, currentRide, setCurrentRide,
                       </button>
                     </div>
                   ) : (
-                    <button
-                      onClick={() => setSelectedRide(ride)}
-                      className="w-full bg-primary text-white font-bold py-3 rounded-xl shadow-lg shadow-primary/10 hover:bg-primary/90 transition-all"
-                    >
-                      Fazer Oferta
-                    </button>
+                    (() => {
+                      const myOffer = offers.find((o: Offer) => o.ride_id === ride.id && o.driver_id === driver.id);
+                      if (myOffer) {
+                        return (
+                          <div className="space-y-3">
+                            <div className="flex justify-between items-center p-3 bg-slate-50 rounded-xl border border-slate-100">
+                              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Sua Oferta</span>
+                              <span className="text-sm font-black text-primary">MT {myOffer.price}</span>
+                            </div>
+                            
+                            {myOffer.counter_price && (
+                              <div className="p-4 bg-secondary/5 border-2 border-secondary/20 rounded-2xl animate-pulse">
+                                <div className="flex justify-between items-center mb-3">
+                                  <span className="text-[10px] font-black text-secondary uppercase tracking-widest">Contraproposta do Cliente</span>
+                                  <span className="text-lg font-black text-secondary">MT {myOffer.counter_price}</span>
+                                </div>
+                                <div className="flex gap-2">
+                                  <button 
+                                    onClick={() => socket.emit('driver_update_offer', { offer_id: myOffer.id, accept_counter: true })}
+                                    className="flex-1 bg-secondary text-white text-[10px] font-bold py-2 rounded-lg hover:bg-secondary/90 transition-all"
+                                  >
+                                    Aceitar MT {myOffer.counter_price}
+                                  </button>
+                                  <button 
+                                    onClick={() => socket.emit('driver_update_offer', { offer_id: myOffer.id, price: myOffer.price, accept_counter: false })}
+                                    className="flex-1 bg-slate-200 text-slate-600 text-[10px] font-bold py-2 rounded-lg hover:bg-slate-300 transition-all"
+                                  >
+                                    Manter MT {myOffer.price}
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      }
+                      return (
+                        <button
+                          onClick={() => setSelectedRide(ride)}
+                          className="w-full bg-primary text-white font-bold py-3 rounded-xl shadow-lg shadow-primary/10 hover:bg-primary/90 transition-all"
+                        >
+                          Fazer Oferta
+                        </button>
+                      );
+                    })()
                   )}
                 </div>
               ))}
@@ -1006,21 +1407,84 @@ function DriverDashboard({ driver, rides, setRides, currentRide, setCurrentRide,
   );
 }
 
-function RideScreen({ ride, role, messages, showToast, setConfirmModal }: { 
+function FeedbackScreen({ ride, role, onFinish }: { ride: Ride, role: 'client' | 'driver', onFinish: () => void }) {
+  const [rating, setRating] = useState(5);
+  const [comment, setComment] = useState('');
+
+  const submit = () => {
+    socket.emit('submit_feedback', { ride_id: ride.id, role, rating, comment });
+    onFinish();
+  };
+
+  return (
+    <div className="flex flex-col items-center justify-center space-y-6 p-6 bg-white rounded-3xl shadow-xl animate-in zoom-in-95">
+      <div className="bg-secondary/10 p-4 rounded-full">
+        <CheckCircle size={48} className="text-secondary" />
+      </div>
+      <div className="text-center space-y-1">
+        <h2 className="text-2xl font-black text-primary">Corrida Finalizada!</h2>
+        <p className="text-slate-500 text-sm">Como foi a sua experiência?</p>
+      </div>
+
+      <div className="flex gap-2">
+        {[1, 2, 3, 4, 5].map((star) => (
+          <button
+            key={star}
+            onClick={() => setRating(star)}
+            className={cn(
+              "p-2 transition-all transform active:scale-90",
+              rating >= star ? "text-yellow-400 scale-110" : "text-slate-200"
+            )}
+          >
+            <Star size={32} fill={rating >= star ? "currentColor" : "none"} />
+          </button>
+        ))}
+      </div>
+
+      <textarea
+        placeholder="Deixe um comentário (opcional)"
+        className="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 min-h-[100px]"
+        value={comment}
+        onChange={(e) => setComment(e.target.value)}
+      />
+
+      <button
+        onClick={submit}
+        className="w-full bg-primary text-white font-bold py-4 rounded-2xl shadow-lg shadow-primary/20 hover:bg-primary/90 transition-all"
+      >
+        Enviar Feedback
+      </button>
+    </div>
+  );
+}
+
+function RideScreen({ ride, role, messages, showToast, setConfirmModal, onRideFinished }: { 
   ride: Ride, 
   role: 'client' | 'driver', 
   messages: Message[],
   showToast: (m: string, t?: any) => void,
-  setConfirmModal: (c: any) => void
+  setConfirmModal: (c: any) => void,
+  onRideFinished: () => void
 }) {
   const [text, setText] = useState('');
+  const [showFeedback, setShowFeedback] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (ride.status === 'finished') {
+      setShowFeedback(true);
+    }
+  }, [ride.status]);
 
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [messages]);
+
+  if (showFeedback) {
+    return <FeedbackScreen ride={ride} role={role} onFinish={onRideFinished} />;
+  }
 
   const sendMessage = (e?: React.FormEvent, customText?: string) => {
     if (e) e.preventDefault();
@@ -1066,20 +1530,28 @@ function RideScreen({ ride, role, messages, showToast, setConfirmModal }: {
             </div>
             <div>
               <p className="text-[10px] font-bold text-slate-400 uppercase leading-none">Em Corrida com</p>
-              <p className="font-bold text-primary">{role === 'client' ? (ride.driver_name || 'Motorista') : ride.client_name}</p>
+              <div className="flex items-center gap-1">
+                <p className="font-bold text-primary">{role === 'client' ? (ride.driver_name || 'Motorista') : ride.client_name}</p>
+                {role === 'driver' && (
+                  <div className="flex items-center gap-0.5 ml-1">
+                    <Star size={10} className="text-yellow-400 fill-yellow-400" />
+                    <span className="text-[10px] font-bold text-slate-400">
+                      {ride.client_avg_rating ? ride.client_avg_rating.toFixed(1) : 'Novo'}
+                    </span>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
           <div className="text-right flex flex-col items-end gap-1">
             <p className="text-[10px] font-bold text-slate-400 uppercase leading-none">Valor</p>
             <p className="text-lg font-black text-secondary">MT {ride.final_price}</p>
-            {otherPersonPhone && (
-              <a 
-                href={`tel:${otherPersonPhone}`}
-                className="flex items-center gap-1 bg-primary/10 text-primary px-2 py-1 rounded-full text-[10px] font-bold"
-              >
-                <Phone size={10} /> Ligar
-              </a>
-            )}
+            <button 
+              onClick={() => showToast('Iniciando ligação segura dentro do app...', 'info')}
+              className="flex items-center gap-1 bg-primary text-white px-3 py-1.5 rounded-full text-[10px] font-bold shadow-lg shadow-primary/20 hover:bg-primary/90 transition-all"
+            >
+              <Phone size={10} /> Ligar via App
+            </button>
           </div>
         </div>
         
@@ -1177,23 +1649,45 @@ function RideScreen({ ride, role, messages, showToast, setConfirmModal }: {
 }
 
 function AdminDashboard({ showToast }: { showToast: (m: string, t?: any) => void }) {
-  const [activeTab, setActiveTab] = useState<'rides' | 'drivers' | 'register'>('rides');
+  const [activeTab, setActiveTab] = useState<'rides' | 'drivers' | 'register' | 'comments'>('rides');
   const [rides, setRides] = useState<Ride[]>([]);
   const [drivers, setDrivers] = useState<Driver[]>([]);
-  const [newDriver, setNewDriver] = useState({ name: '', phone: '', key: '', category: 'Moto' as Category });
+  const [comments, setComments] = useState<any[]>([]);
+  const [newDriver, setNewDriver] = useState({ name: '', phone: '', key: '', category: 'Moto' as Category, photo: '' });
   const [selectedRideMessages, setSelectedRideMessages] = useState<{rideId: number, messages: Message[]} | null>(null);
+  const [dangerAlert, setDangerAlert] = useState<{rideId: number, driverId: number, driverName?: string} | null>(null);
+  const alertAudio = useRef<HTMLAudioElement | null>(null);
 
   const [selectedRideOffers, setSelectedRideOffers] = useState<{rideId: number, offers: Offer[]} | null>(null);
   const [selectedDriverRides, setSelectedDriverRides] = useState<{driverName: string, rides: Ride[]} | null>(null);
 
   const fetchData = async () => {
-    const [ridesRes, driversRes] = await Promise.all([
+    const [ridesRes, driversRes, commentsRes] = await Promise.all([
       fetch('/api/admin/rides'),
-      fetch('/api/admin/drivers')
+      fetch('/api/admin/drivers'),
+      fetch('/api/admin/comments')
     ]);
     setRides(await ridesRes.json());
     setDrivers(await driversRes.json());
+    setComments(await commentsRes.json());
   };
+
+  useEffect(() => {
+    alertAudio.current = new Audio('https://actions.google.com/sounds/v1/alarms/alarm_clock.ogg');
+    alertAudio.current.loop = true;
+
+    socket.on('admin_danger_alert', (data) => {
+      const driver = drivers.find(d => d.id === data.driver_id);
+      setDangerAlert({ ...data, driverName: driver?.name });
+      alertAudio.current?.play().catch(e => console.log("Audio play failed", e));
+      showToast(`ALERTA DE PERIGO: Motorista ${driver?.name || data.driver_id} em perigo!`, 'danger');
+    });
+
+    return () => {
+      socket.off('admin_danger_alert');
+      alertAudio.current?.pause();
+    };
+  }, [drivers]);
 
   useEffect(() => {
     fetchData();
@@ -1206,14 +1700,40 @@ function AdminDashboard({ showToast }: { showToast: (m: string, t?: any) => void
     const res = await fetch('/api/admin/drivers', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...newDriver, access_key: newDriver.key })
+      body: JSON.stringify({ 
+        name: newDriver.name.trim(),
+        phone: newDriver.phone.trim(),
+        access_key: newDriver.key.trim(),
+        category: newDriver.category,
+        photo: newDriver.photo
+      })
     });
     if (res.ok) {
       showToast('Motorista registrado com sucesso!', 'success');
-      setNewDriver({ name: '', phone: '', key: '', category: 'Moto' });
+      setNewDriver({ name: '', phone: '', key: '', category: 'Moto', photo: '' });
       fetchData();
     } else {
       showToast('Erro ao registrar motorista.', 'error');
+    }
+  };
+
+  const deleteRide = async (rideId: number) => {
+    if (confirm('Deseja realmente apagar esta corrida?')) {
+      const res = await fetch(`/api/admin/rides/${rideId}`, { method: 'DELETE' });
+      if (res.ok) {
+        setRides(prev => prev.filter(r => r.id !== rideId));
+        showToast('Corrida apagada com sucesso!', 'success');
+      }
+    }
+  };
+
+  const deleteAllRides = async () => {
+    if (confirm('Deseja realmente apagar TODAS as corridas? Esta ação é irreversível.')) {
+      const res = await fetch('/api/admin/rides', { method: 'DELETE' });
+      if (res.ok) {
+        setRides([]);
+        showToast('Todas as corridas foram apagadas!', 'success');
+      }
     }
   };
 
@@ -1235,7 +1755,29 @@ function AdminDashboard({ showToast }: { showToast: (m: string, t?: any) => void
     setSelectedDriverRides({ driverName: driver.name, rides: data });
   };
 
-  const totalCommission = rides.reduce((acc, r) => acc + (r.admin_fee || 0), 0);
+  const deleteDriver = async (driverId: number) => {
+    if (confirm('Deseja realmente remover este motorista do sistema? Esta ação é irreversível.')) {
+      const res = await fetch(`/api/admin/drivers/${driverId}`, { method: 'DELETE' });
+      if (res.ok) {
+        setDrivers(prev => prev.filter(d => d.id !== driverId));
+        showToast('Motorista removido com sucesso!', 'success');
+      }
+    }
+  };
+
+  const resetEarnings = async () => {
+    if (confirm('Deseja redefinir os ganhos totais para zero? As corridas atuais serão marcadas como pagas.')) {
+      const res = await fetch('/api/admin/reset-earnings', { method: 'POST' });
+      if (res.ok) {
+        setRides(prev => prev.map(r => r.status === 'finished' ? { ...r, settled: 1 } : r));
+        showToast('Ganhos redefinidos com sucesso!', 'success');
+      }
+    }
+  };
+
+  const totalCommission = rides
+    .filter(r => r.status === 'finished' && !r.settled)
+    .reduce((acc, r) => acc + (r.admin_fee || 0), 0);
 
   return (
     <div className="space-y-6">
@@ -1247,9 +1789,15 @@ function AdminDashboard({ showToast }: { showToast: (m: string, t?: any) => void
           <Shield className="text-secondary" />
         </div>
         <div className="grid grid-cols-2 gap-4">
-          <div className="bg-white/5 p-4 rounded-2xl border border-white/10">
+          <div className="bg-white/5 p-4 rounded-2xl border border-white/10 relative group">
             <p className="text-white/40 text-[10px] font-bold uppercase">Ganhos Totais (10%)</p>
             <p className="text-2xl font-black text-secondary">MT {totalCommission.toFixed(2)}</p>
+            <button 
+              onClick={resetEarnings}
+              className="absolute top-2 right-2 bg-white/10 hover:bg-white/20 text-[8px] font-bold px-2 py-1 rounded uppercase transition-colors"
+            >
+              Resetar
+            </button>
           </div>
           <div className="bg-white/5 p-4 rounded-2xl border border-white/10">
             <p className="text-white/40 text-[10px] font-bold uppercase">Motoristas</p>
@@ -1259,22 +1807,31 @@ function AdminDashboard({ showToast }: { showToast: (m: string, t?: any) => void
       </div>
 
       <div className="flex bg-slate-100 p-1 rounded-xl">
-        {(['rides', 'drivers', 'register'] as const).map((t) => (
+        {(['rides', 'drivers', 'comments', 'register'] as const).map((t) => (
           <button
             key={t}
             onClick={() => setActiveTab(t)}
             className={cn(
-              "flex-1 py-2 text-xs font-bold rounded-lg transition-all capitalize",
+              "flex-1 py-2 text-[10px] font-bold rounded-lg transition-all capitalize",
               activeTab === t ? "bg-white text-primary shadow-sm" : "text-slate-500"
             )}
           >
-            {t === 'rides' ? 'Corridas' : t === 'drivers' ? 'Motoristas' : 'Novo Motorista'}
+            {t === 'rides' ? 'Corridas' : t === 'drivers' ? 'Motoristas' : t === 'comments' ? 'Comentários' : 'Novo Motorista'}
           </button>
         ))}
       </div>
 
       {activeTab === 'rides' && (
         <div className="space-y-3">
+          <div className="flex justify-between items-center px-2 mb-2">
+            <h3 className="text-xs font-bold text-slate-400 uppercase tracking-widest">Lista de Corridas</h3>
+            <button 
+              onClick={deleteAllRides}
+              className="flex items-center gap-1 text-[10px] font-bold text-red-500 bg-red-50 px-3 py-1.5 rounded-full hover:bg-red-100"
+            >
+              <Trash2 size={12} /> Limpar Tudo
+            </button>
+          </div>
           {rides.map(ride => (
             <div key={ride.id} className="bg-white rounded-2xl p-4 shadow-sm border border-slate-100">
               <div className="flex justify-between items-start mb-3">
@@ -1282,14 +1839,22 @@ function AdminDashboard({ showToast }: { showToast: (m: string, t?: any) => void
                   <p className="text-xs font-bold text-primary">#{ride.id} - {ride.client_name}</p>
                   <p className="text-[10px] text-slate-400">{ride.client_phone || 'Sem Telefone'} • {new Date(ride.created_at).toLocaleString()}</p>
                 </div>
-                <span className={cn(
-                  "text-[8px] font-black px-2 py-1 rounded uppercase",
-                  ride.status === 'finished' ? "bg-green-100 text-green-600" : 
-                  ride.status === 'danger' ? "bg-red-100 text-red-600 animate-pulse" :
-                  "bg-slate-100 text-slate-500"
-                )}>
-                  {ride.status}
-                </span>
+                <div className="flex flex-col items-end gap-2">
+                  <span className={cn(
+                    "text-[8px] font-black px-2 py-1 rounded uppercase",
+                    ride.status === 'finished' ? "bg-green-100 text-green-600" : 
+                    ride.status === 'danger' ? "bg-red-100 text-red-600 animate-pulse" :
+                    "bg-slate-100 text-slate-500"
+                  )}>
+                    {ride.status}
+                  </span>
+                  <button 
+                    onClick={() => deleteRide(ride.id)}
+                    className="text-red-400 hover:text-red-600 p-1"
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                </div>
               </div>
               <div className="grid grid-cols-2 gap-4 text-[10px] mb-3">
                 <div>
@@ -1334,9 +1899,16 @@ function AdminDashboard({ showToast }: { showToast: (m: string, t?: any) => void
                     <p className="text-[10px] text-slate-400">{d.phone} • {d.category}</p>
                   </div>
                 </div>
-                <div className="text-right">
+                <div className="text-right flex flex-col items-end gap-1">
                   <p className="text-[10px] font-bold text-slate-400 uppercase">Chave</p>
                   <p className="text-xs font-mono font-bold">{d.access_key}</p>
+                  <button 
+                    onClick={() => deleteDriver(d.id)}
+                    className="text-red-400 hover:text-red-600 p-1 mt-1"
+                    title="Remover Motorista"
+                  >
+                    <Trash2 size={14} />
+                  </button>
                 </div>
               </div>
               
@@ -1361,8 +1933,43 @@ function AdminDashboard({ showToast }: { showToast: (m: string, t?: any) => void
         </div>
       )}
 
+      {activeTab === 'comments' && (
+        <div className="space-y-3">
+          <h3 className="text-xs font-bold text-slate-400 uppercase tracking-widest ml-2">Feedback dos Clientes</h3>
+          {comments.length === 0 ? (
+            <p className="text-center text-slate-400 py-10">Nenhum comentário ainda.</p>
+          ) : (
+            comments.map((c, i) => (
+              <div key={i} className="bg-white rounded-2xl p-4 shadow-sm border border-slate-100">
+                <div className="flex justify-between items-start mb-2">
+                  <div>
+                    <p className="text-xs font-bold text-primary">{c.client_name}</p>
+                    <p className="text-[8px] text-slate-400 uppercase">{new Date(c.created_at).toLocaleString()}</p>
+                  </div>
+                  <div className="flex items-center gap-0.5">
+                    {[...Array(5)].map((_, i) => (
+                      <Star 
+                        key={i} 
+                        size={10} 
+                        className={cn(i < c.client_rating ? "text-yellow-400 fill-yellow-400" : "text-slate-200")} 
+                      />
+                    ))}
+                  </div>
+                </div>
+                <p className="text-xs text-slate-600 italic">"{c.client_comment || 'Sem comentário escrito'}"</p>
+                <p className="text-[10px] text-slate-400 mt-2">Motorista: <span className="font-bold">{c.driver_name}</span></p>
+              </div>
+            ))
+          )}
+        </div>
+      )}
+
       {activeTab === 'register' && (
         <form onSubmit={registerDriver} className="bg-white rounded-3xl p-6 shadow-sm border border-slate-100 space-y-4">
+          <PhotoUpload 
+            onPhotoCaptured={(base64) => setNewDriver({ ...newDriver, photo: base64 })} 
+            currentPhoto={newDriver.photo} 
+          />
           <div className="space-y-1">
             <label className="text-xs font-bold text-slate-400 uppercase">Nome Completo</label>
             <input
@@ -1432,6 +2039,35 @@ function AdminDashboard({ showToast }: { showToast: (m: string, t?: any) => void
                 </div>
               ))}
               {selectedRideOffers.offers.length === 0 && <p className="text-center text-slate-400 text-xs italic">Nenhuma oferta recebida.</p>}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Danger Alert Modal */}
+      {dangerAlert && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-red-600/90 backdrop-blur-sm animate-in fade-in duration-300">
+          <div className="bg-white rounded-3xl p-8 max-w-sm w-full shadow-2xl text-center space-y-6 animate-in zoom-in-95 duration-300 border-4 border-white">
+            <div className="w-20 h-20 bg-red-100 rounded-full flex items-center justify-center mx-auto animate-bounce">
+              <AlertTriangle size={40} className="text-red-600" />
+            </div>
+            <div>
+              <h2 className="text-2xl font-black text-red-600 uppercase tracking-tight">ALERTA DE PERIGO!</h2>
+              <p className="text-slate-600 mt-2 font-medium">O motorista <span className="font-black text-primary">{dangerAlert.driverName || 'Desconhecido'}</span> acionou o botão de pânico!</p>
+              <p className="text-xs text-slate-400 mt-1">Corrida ID: #{dangerAlert.rideId}</p>
+            </div>
+            <div className="space-y-3">
+              <button 
+                onClick={() => {
+                  setDangerAlert(null);
+                  alertAudio.current?.pause();
+                  if (alertAudio.current) alertAudio.current.currentTime = 0;
+                }}
+                className="w-full bg-red-600 text-white font-bold py-4 rounded-2xl shadow-lg shadow-red-600/30 active:scale-95 transition-all"
+              >
+                ENTENDIDO / PARAR SOM
+              </button>
+              <p className="text-[10px] font-bold text-slate-400 uppercase">Tome providências imediatas e contacte as autoridades se necessário.</p>
             </div>
           </div>
         </div>

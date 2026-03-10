@@ -6,12 +6,11 @@ import path from 'path';
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   define: {
-    // Forçamos o ambiente como produção e definimos os dados de acesso diretamente
     'process.env': {
-      NODE_ENV: 'production',
-      VITE_ADMIN_USERNAME: 'Shadowwalker',
-      VITE_ADMIN_PASSWORD: '123', // Mudei para uma senha simples para teste
-      VITE_GOOGLE_MAPS_API_KEY: '', // Deixamos vazio para não travar o mapa
+      NODE_ENV: JSON.stringify('production'),
+      VITE_ADMIN_USERNAME: JSON.stringify('Shadowwalker'),
+      VITE_ADMIN_PASSWORD: JSON.stringify('123'),
+      VITE_GOOGLE_MAPS_API_KEY: JSON.stringify('')
     }
   },
   resolve: {
@@ -20,8 +19,6 @@ export default defineConfig({
     },
   },
   preview: {
-    host: '0.0.0.0',
-    port: 4173,
     allowedHosts: ['mova-te.onrender.com']
   }
 });

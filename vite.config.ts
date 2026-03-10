@@ -10,13 +10,16 @@ export default defineConfig({
       NODE_ENV: JSON.stringify('production'),
       VITE_ADMIN_USERNAME: JSON.stringify('Shadowwalker'),
       VITE_ADMIN_PASSWORD: JSON.stringify('123'),
-      VITE_GOOGLE_MAPS_API_KEY: JSON.stringify('')
     }
   },
   resolve: {
     alias: {
       '@': path.resolve(__dirname, '.'),
     },
+  },
+  build: {
+    sourcemap: false,
+    chunkSizeWarningLimit: 1600,
   },
   preview: {
     allowedHosts: ['mova-te.onrender.com']

@@ -12,7 +12,7 @@ export default defineConfig(({ mode }) => {
       'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY),
       'process.env.APP_URL': JSON.stringify(env.APP_URL),
       'process.env.VITE_ADMIN_USERNAME': JSON.stringify('Shadowwalker'),
-      'process.env.VITE_ADMIN_PASSWORD': JSON.stringify('sua_senha_aqui')
+      'process.env.VITE_ADMIN_PASSWORD': JSON.stringify('245599movate')
     },
     resolve: {
       alias: {

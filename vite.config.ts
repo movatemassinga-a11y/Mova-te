@@ -4,15 +4,12 @@ import tailwindcss from '@tailwindcss/vite';
 import path from 'path';
 
 export default defineConfig(({ mode }) => {
-  const env = loadEnv(mode, '.', '');
-  
   return {
     plugins: [react(), tailwindcss()],
     define: {
-      'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY),
-      'process.env.APP_URL': JSON.stringify(env.APP_URL),
       'process.env.VITE_ADMIN_USERNAME': JSON.stringify('Shadowwalker'),
-      'process.env.VITE_ADMIN_PASSWORD': JSON.stringify('245599movate')
+      'process.env.VITE_ADMIN_PASSWORD': JSON.stringify('123456'), // Podes mudar o 123456 para o que quiseres
+      'process.env.NODE_ENV': JSON.stringify('production')
     },
     resolve: {
       alias: {
@@ -20,7 +17,7 @@ export default defineConfig(({ mode }) => {
       },
     },
     server: {
-      hmr: process.env.DISABLE_HMR !== 'true',
+      hmr: true,
     },
     preview: {
       allowedHosts: ['mova-te.onrender.com']
